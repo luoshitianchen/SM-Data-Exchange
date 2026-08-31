@@ -1,88 +1,78 @@
+"""SM Data Exchange 领域测试：连接器、交换任务、运行记录与统计。"""
+
+import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+
+from app import base
+from app.main import VERSION, app
 
 
-def test_health_and_security_headers():
-    with TestClient(app) as client:
-        response = client.get('/health', headers={'X-Request-Id': 'suite-test'})
-        assert response.status_code == 200
-        assert response.headers['X-Request-Id'] == 'suite-test'
-        assert response.headers['X-Frame-Options'] == 'DENY'
-        assert response.json()['version'] == '1.0.0'
+@pytest.fixture()
+def client(monkeypatch):
+    monkeypatch.setattr(base, "internal_api_key", lambda: "TEST")
+    base.reset_state()
+    from app.main import _init as init_db
+    init_db()
+    with TestClient(app) as c:
+        c.headers["X-Internal-Token"] = "TEST"
+        yield c
 
 
-def test_overview_and_item_lifecycle(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TEST')
-    with TestClient(app) as client:
-        overview = client.get('/api/overview').json()
-        assert overview['total'] >= 2
-        created = client.post('/api/items', headers={'X-Internal-Token': 'TEST'}, json={'name': '企业级测试资源', 'owner': '测试部', 'priority': 'P2'}).json()
-        assert created['status'] == 'active'
-        updated = client.patch(f"/api/items/{created['id']}/status?item_status=review", headers={'X-Internal-Token': 'TEST'})
-        assert updated.status_code == 200
-        assert updated.json()['status'] == 'review'
+def _connectors(client):
+    src = client.post("/api/exchange/connectors", json={"name": "pg-prod", "connector_type": "database", "endpoint": "postgres://prod"}).json()["id"]
+    dst = client.post("/api/exchange/connectors", json={"name": "dw", "connector_type": "database", "endpoint": "postgres://dw"}).json()["id"]
+    return src, dst
 
 
-def test_ops_metrics():
-    with TestClient(app) as client:
-        client.get('/health')
-        metrics = client.get('/api/ops/metrics')
-        assert metrics.status_code == 200
-        assert metrics.json()['requests_total'] >= 1
+def test_health_and_version(client):
+    r = client.get("/health", headers={"X-Request-Id": "suite-test"})
+    assert r.status_code == 200
+    assert r.json()["version"] == VERSION
 
 
-
-def test_integration_manifest_contract():
-    with TestClient(app) as client:
-        response = client.get('/api/integration/manifest')
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload['service']
-        assert payload['version'] == '1.0.0'
-        assert '/api/ops/metrics' == payload['metrics_path']
-        assert isinstance(payload['dependencies'], list)
+def test_connector_lifecycle(client):
+    assert client.post("/api/exchange/connectors", json={"name": "api-src", "connector_type": "api", "endpoint": "https://api.example.com"}).status_code == 201
+    assert client.post("/api/exchange/connectors", json={"name": "api-src", "connector_type": "api", "endpoint": "https://api.example.com"}).status_code == 409
+    assert client.get("/api/exchange/connectors").json()["total"] == 1
 
 
-
-def test_request_size_and_rate_limit_guards(monkeypatch):
-    from app import main
-    main.RATE_BUCKETS.clear()
-    monkeypatch.setattr(main, 'MAX_REQUEST_BYTES', 4)
-    monkeypatch.setattr(main, 'RATE_MAX_REQUESTS', 1)
-    with TestClient(app) as client:
-        oversized = client.post('/api/items', content='12345', headers={'content-type': 'application/json'})
-        assert oversized.status_code == 413
-        assert client.get('/health').status_code == 200
-        limited = client.get('/health')
-        assert limited.status_code == 429
-        assert limited.headers['Retry-After']
+def test_job_and_run(client):
+    src, dst = _connectors(client)
+    job = client.post("/api/exchange/jobs", json={"name": "sync-orders", "source_id": src, "target_id": dst, "mapping": {"order": "order"}})
+    assert job.status_code == 201
+    job_id = job.json()["id"]
+    run = client.post(f"/api/exchange/jobs/{job_id}/run").json()
+    assert run["status"] == "success"
+    assert run["rows_written"] > 0
+    assert client.get(f"/api/exchange/jobs/{job_id}/runs").json()["total"] == 1
+    assert client.get(f"/api/exchange/runs/{run['id']}").json()["rows_written"] == run["rows_written"]
 
 
-def test_internal_write_token_is_enforced(monkeypatch):
-    from app import main
-    monkeypatch.setattr(main, 'INTERNAL_API_KEY', 'TOKEN')
-    with TestClient(app) as client:
-        blocked = client.post('/api/items', json={'name': 'blocked'})
-        assert blocked.status_code == 403
-        allowed = client.post('/api/items', headers={'X-Internal-Token': 'TOKEN'}, json={'name': 'allowed'})
-        assert allowed.status_code == 201
+def test_job_requires_valid_connectors(client):
+    assert client.post("/api/exchange/jobs", json={"name": "bad", "source_id": "no-such-conn", "target_id": "no-such-conn"}).status_code == 404
 
 
-
-def test_sm3_crypto_endpoint():
-    with TestClient(app) as client:
-        response = client.post('/api/crypto/sm3', json={'value': 'enterprise'})
-        assert response.status_code == 200
-        assert response.json()['algorithm'] == 'SM3'
-        assert len(response.json()['digest']) == 64
-        assert client.get('/api/crypto/status').json()['sm4'] == 'enabled'
+def test_missing_job(client):
+    assert client.post("/api/exchange/jobs/nope/run").status_code == 404
+    assert client.get("/api/exchange/runs/nope").status_code == 404
 
 
+def test_stats(client):
+    src, dst = _connectors(client)
+    job_id = client.post("/api/exchange/jobs", json={"name": "sync-1", "source_id": src, "target_id": dst}).json()["id"]
+    client.post(f"/api/exchange/jobs/{job_id}/run")
+    stats = client.get("/api/exchange/stats").json()
+    assert stats["jobs"] == 1
+    assert stats["success_runs"] == 1
+    assert stats["total_rows_written"] > 0
 
-def test_security_baseline():
-    with TestClient(app) as client:
-        payload = client.get('/api/security/baseline').json()
-        assert payload['controls']['sm3'] is True
-        assert payload['controls']['sm4'] is True
-        assert payload['controls']['rate_limit'] is True
+
+def test_manifest_and_crypto(client):
+    assert client.get("/api/integration/manifest").json()["version"] == VERSION
+    enc = client.post("/api/crypto/encrypt", json={"value": "x"}).json()["ciphertext"]
+    assert client.post("/api/crypto/decrypt", json={"value": enc}).json()["plaintext"] == "x"
+
+
+def test_write_requires_auth(client):
+    del client.headers["X-Internal-Token"]
+    assert client.post("/api/exchange/connectors", json={"name": "c", "connector_type": "api", "endpoint": "x"}).status_code == 401

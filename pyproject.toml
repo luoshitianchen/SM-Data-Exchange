@@ -1,0 +1,16 @@
+[project]
+name = "SM-Data-Exchange"
+version = "2.0.0"
+description = "数据交换与集成：连接器、交换任务、运行日志与调度"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 200
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
