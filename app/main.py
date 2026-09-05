@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app import base
 
 SERVICE = "sm-data-exchange"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 NAME = "SM Data Exchange"
 DESCRIPTION = "数据交换与集成：连接器、交换任务、运行日志与调度"
 PORT = 8480
