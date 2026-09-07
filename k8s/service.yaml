@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sm-data-exchange
+  namespace: sm
+  labels:
+    app: sm-data-exchange
+    platform: sm-suite
+spec:
+  type: ClusterIP
+  selector:
+    app: sm-data-exchange
+  ports:
+  - name: http
+    port: 8480
+    targetPort: http
+    protocol: TCP
