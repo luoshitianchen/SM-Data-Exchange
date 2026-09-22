@@ -1,0 +1,12 @@
+apiVersion: v2
+name: sm-data-exchange
+description: SM 微服务 Helm Chart - SM-Data-Exchange（数据交换服务）
+type: application
+version: 1.0.0
+appVersion: "2.1.0"
+keywords:
+  - sm-microservices
+  - enterprise
+  - sm-data-exchange
+maintainers:
+  - name: sm-platform-team
